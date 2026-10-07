@@ -183,7 +183,7 @@ def api_recommend_auto():
         client = Anthropic()
         prompt = core.build_prompt(tracks, diag, concept, exclude, n)
         resp = client.messages.create(
-            model=model, max_tokens=2500,
+            model=model, max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(b.text for b in resp.content if b.type == "text")
@@ -329,14 +329,28 @@ INDEX_HTML = r"""<!DOCTYPE html>
   th{color:var(--sub);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.04em;}
   .tracklist{max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;}
 
+  .tier-heading{font-size:14px;font-weight:800;margin:18px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);}
+  .tier-heading:first-child{margin-top:0;}
+  .tier-heading .cnt{color:var(--sub);font-weight:600;font-size:12px;margin-left:6px;}
+
   .rec-card{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;gap:12px;align-items:flex-start;}
+  .rec-card.essential{border-left:3px solid var(--good);}
+  .rec-card.deepcut{border-left:3px solid var(--warn);}
   .rec-card input[type=checkbox]{margin-top:4px;width:auto;}
   .rec-main{flex:1;}
-  .rec-title{font-weight:700;font-size:14px;margin-bottom:4px;}
-  .rec-reason{font-size:13px;color:var(--sub);margin-bottom:6px;}
+  .rec-title{font-weight:700;font-size:14px;margin-bottom:2px;}
+  .rec-meta{font-size:12px;color:var(--sub);margin-bottom:8px;}
+  .stars{color:#C9941E;letter-spacing:1px;}
+  .rec-row{font-size:13px;color:var(--ink);margin-bottom:5px;line-height:1.5;}
+  .rec-row b{font-weight:700;margin-right:4px;}
+  .rec-row.sub{color:var(--sub);}
+  .rec-row.compare{background:#FBFBF9;border:1px dashed var(--line);border-radius:6px;padding:6px 10px;margin-top:6px;}
+  .rec-row.replace{background:var(--bad-bg);color:var(--bad);border-radius:6px;padding:6px 10px;margin-top:4px;}
   .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;margin-right:6px;}
   .badge.ok{background:var(--good-bg);color:var(--good);}
   .badge.warn{background:var(--warn-bg);color:var(--warn);}
+  .badge.tier-essential{background:var(--good-bg);color:var(--good);}
+  .badge.tier-deepcut{background:var(--warn-bg);color:var(--warn);}
   .rec-links a{font-size:12px;color:var(--ink);text-decoration:underline;}
 
   .status{font-size:13px;color:var(--sub);margin-top:10px;}
@@ -773,6 +787,45 @@ function applyRecommendations(genre, recs){
   }
 }
 
+function escapeHtml(s){
+  if(s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function starStr(n){
+  const v = Math.max(0, Math.min(5, parseInt(n) || 0));
+  return '★'.repeat(v) + '☆'.repeat(5 - v);
+}
+
+function renderRecCard(r, i){
+  const verified = r.verified === true;
+  const verifiedKnown = 'verified' in r;
+  const existBadge = !verifiedKnown ? '' :
+    (verified ? '<span class="badge ok">확인됨</span>' : '<span class="badge warn">실존 확인 필요</span>');
+  const tier = r.tier === 'essential' ? 'essential' : (r.tier === 'deepcut' ? 'deepcut' : '');
+  const tierBadge = tier ? `<span class="badge tier-${tier}">${tier === 'essential' ? '필수급' : '마니아용'}</span>` : '';
+  const searchUrl = r.search_url || `https://www.melon.com/search/song/index.htm?q=${encodeURIComponent(r.artist + ' ' + r.title)}`;
+  const metaBits = [];
+  if(r.star) metaBits.push(`<span class="stars">${starStr(r.star)}</span>`);
+  if(r.year) metaBits.push(`${r.year}`);
+  if(r.album) metaBits.push(`${escapeHtml(r.album)}`);
+  const card = document.createElement('div');
+  card.className = 'rec-card' + (tier ? ' ' + tier : '');
+  card.innerHTML = `
+    <input type="checkbox" class="recCheck" data-idx="${i}" checked>
+    <div class="rec-main">
+      <div class="rec-title">${existBadge}${tierBadge}${escapeHtml(r.artist)} - ${escapeHtml(r.title)}</div>
+      <div class="rec-meta">${metaBits.join(' · ')}</div>
+      ${r.sound_match ? `<div class="rec-row"><b>사운드 일치</b>${escapeHtml(r.sound_match)}</div>` : ''}
+      ${r.evidence ? `<div class="rec-row"><b>근거</b>${escapeHtml(r.evidence)}</div>` : ''}
+      ${!r.sound_match && !r.evidence && r.reason ? `<div class="rec-row sub">${escapeHtml(r.reason)}</div>` : ''}
+      ${r.comparison ? `<div class="rec-row compare"><b>기존 목록과 비교</b>${escapeHtml(r.comparison)}</div>` : ''}
+      ${r.replace_candidate ? `<div class="rec-row replace"><b>교체 후보</b>${escapeHtml(r.replace_candidate)}</div>` : ''}
+      <div class="rec-links"><a href="${searchUrl}" target="_blank">멜론에서 확인 →</a></div>
+    </div>`;
+  return card;
+}
+
 function renderRecommendations(recs){
   const list = document.getElementById('recList');
   list.innerHTML = '';
@@ -780,23 +833,43 @@ function renderRecommendations(recs){
     list.innerHTML = '<p class="hint">추천곡이 없습니다.</p>';
     return;
   }
+
+  const hasTiers = recs.some(r => r.tier === 'essential' || r.tier === 'deepcut');
+  if(!hasTiers){
+    recs.forEach((r, i) => list.appendChild(renderRecCard(r, i)));
+    return;
+  }
+
+  const essentials = [];
+  const deepcuts = [];
+  const others = [];
   recs.forEach((r, i) => {
-    const card = document.createElement('div');
-    card.className = 'rec-card';
-    const verified = r.verified === true;
-    const verifiedKnown = 'verified' in r;
-    const badge = !verifiedKnown ? '' :
-      (verified ? '<span class="badge ok">확인됨</span>' : '<span class="badge warn">실존 확인 필요</span>');
-    const searchUrl = r.search_url || `https://www.melon.com/search/song/index.htm?q=${encodeURIComponent(r.artist + ' ' + r.title)}`;
-    card.innerHTML = `
-      <input type="checkbox" class="recCheck" data-idx="${i}" checked>
-      <div class="rec-main">
-        <div class="rec-title">${badge}${r.artist} - ${r.title}</div>
-        <div class="rec-reason">${r.reason || ''}</div>
-        <div class="rec-links"><a href="${searchUrl}" target="_blank">멜론에서 확인 →</a></div>
-      </div>`;
-    list.appendChild(card);
+    if(r.tier === 'essential') essentials.push(i);
+    else if(r.tier === 'deepcut') deepcuts.push(i);
+    else others.push(i);
   });
+
+  if(essentials.length){
+    const h = document.createElement('div');
+    h.className = 'tier-heading';
+    h.innerHTML = `우선 추가 추천 — 거의 필수급 <span class="cnt">${essentials.length}곡</span>`;
+    list.appendChild(h);
+    essentials.forEach(i => list.appendChild(renderRecCard(recs[i], i)));
+  }
+  if(deepcuts.length){
+    const h = document.createElement('div');
+    h.className = 'tier-heading';
+    h.innerHTML = `마니아 쪽까지 고려하면 추가할 곡 <span class="cnt">${deepcuts.length}곡</span>`;
+    list.appendChild(h);
+    deepcuts.forEach(i => list.appendChild(renderRecCard(recs[i], i)));
+  }
+  if(others.length){
+    const h = document.createElement('div');
+    h.className = 'tier-heading';
+    h.innerHTML = `기타 추천 <span class="cnt">${others.length}곡</span>`;
+    list.appendChild(h);
+    others.forEach(i => list.appendChild(renderRecCard(recs[i], i)));
+  }
 }
 
 async function verifyRecs(){
